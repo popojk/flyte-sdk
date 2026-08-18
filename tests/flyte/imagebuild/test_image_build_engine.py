@@ -14,6 +14,29 @@ from flyte._internal.imagebuild.image_builder import (
 )
 
 
+def test_get_builder_accepts_instance():
+    """A builder instance (e.g. from ``flyte.init(image_builder=MyBuilder())``) is used as-is.
+
+    Regression for FLYTE-SDK-61: passing an instance previously fell through to the
+    entry-point name lookup and raised ``ValueError: Unknown image builder type``.
+    """
+
+    class _CustomBuilder:
+        async def build_image(self, image, dry_run, wait=True, force=False):  # pragma: no cover
+            raise NotImplementedError
+
+        def get_checkers(self):
+            return None
+
+    instance = _CustomBuilder()
+    assert ImageBuildEngine._get_builder(instance) is instance
+
+
+def test_get_builder_unknown_name_still_raises():
+    with pytest.raises(ValueError, match="Unknown image builder type"):
+        ImageBuildEngine._get_builder("does-not-exist")
+
+
 @mock.patch("flyte._internal.imagebuild.image_builder.DockerAPIImageChecker.image_exists")
 @mock.patch("flyte._internal.imagebuild.image_builder.LocalDockerCommandImageChecker.image_exists")
 @mock.patch("flyte._internal.imagebuild.image_builder.PersistentCacheImageChecker.image_exists")
@@ -87,6 +110,34 @@ async def test_build_skips_when_image_exists(mock_image_exists, mock_get_builder
     assert result.uri == "docker.io/test-image:v1.0"
     # Builder should NOT have been called since image exists
     mock_builder.build_image.assert_not_called()
+
+
+@mock.patch("flyte._internal.imagebuild.image_builder._write_image_cache")
+@mock.patch("flyte._image._get_push_registry", return_value="ghcr.io/test-owner")
+@mock.patch("flyte._internal.imagebuild.image_builder.ImageBuildEngine._get_builder")
+@mock.patch("flyte._internal.imagebuild.image_builder.ImageBuildEngine.image_exists", new_callable=mock.AsyncMock)
+@pytest.mark.asyncio
+async def test_build_applies_configured_push_registry_to_preinit_image(
+    mock_image_exists, mock_get_builder, mock_get_push_registry, mock_write_cache
+):
+    """Images declared before init have no registry, but local build should honor
+    image.registry once init_from_config has loaded it."""
+    ImageBuildEngine.build.cache_clear()
+    mock_image_exists.return_value = None
+    mock_builder = mock.AsyncMock()
+    mock_builder.build_image.return_value = ImageBuild(uri="ghcr.io/test-owner/my-app:tag", remote_run=None)
+    mock_get_builder.return_value = mock_builder
+
+    img = Image.from_base("ghcr.io/example/base:latest").clone(name="my-app", extendable=True)
+    assert img.registry is None
+
+    result = await ImageBuildEngine.build(image=img)
+
+    assert result.uri == "ghcr.io/test-owner/my-app:tag"
+    checked_image = mock_image_exists.call_args.args[0]
+    built_image = mock_builder.build_image.call_args.args[0]
+    assert checked_image.registry == "ghcr.io/test-owner"
+    assert built_image.registry == "ghcr.io/test-owner"
 
 
 @mock.patch("flyte._internal.imagebuild.image_builder.ImageBuildEngine._get_builder")

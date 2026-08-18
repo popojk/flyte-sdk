@@ -245,6 +245,16 @@ class _BackgroundLoop:
             raise e
 
 
+def _resolve_sync_wrapper_by_name(module: str, qualname: str) -> Any:
+    """Reconstructor used by `_SyncWrapper.__reduce__` to re-import a module-level wrapper."""
+    import importlib
+
+    obj: Any = importlib.import_module(module)
+    for part in qualname.split("."):
+        obj = getattr(obj, part)
+    return obj
+
+
 class _SyncWrapper:
     """
     A wrapper class that the Syncify decorator uses to convert asynchronous functions or methods into synchronous ones.
@@ -260,12 +270,31 @@ class _SyncWrapper:
         self._bg_loop = bg_loop
         self._underlying_obj = underlying_obj
 
+    def __reduce__(self) -> Any:
+        # cloudpickle pulls captured globals by value when serializing a function. If a user
+        # function closes over a module-level syncify-wrapped helper (for example
+        # ``flyte._trace._fetch_action_outputs``), the default reducer tries to serialize the
+        # _BackgroundLoop, whose asyncio loop holds a ThreadPoolExecutor backed by a
+        # SimpleQueue — and SimpleQueue is unpicklable. When the wrapper is importable at its
+        # original module path, pickle it by reference so the consumer just re-imports.
+        module = getattr(self, "__module__", None) or getattr(self.fn, "__module__", None)
+        qualname = getattr(self, "__qualname__", None) or getattr(self.fn, "__qualname__", None)
+        if module and qualname and "<locals>" not in qualname and "<lambda>" not in qualname:
+            try:
+                resolved = _resolve_sync_wrapper_by_name(module, qualname)
+            except (ImportError, AttributeError):
+                resolved = None
+            if resolved is self:
+                return (_resolve_sync_wrapper_by_name, (module, qualname))
+        return super().__reduce__()
+
     def __get__(self, instance: Any, owner: Any) -> Any:
         """
         This method is called when the wrapper is accessed as a method of a class instance.
-        :param instance:
-        :param owner:
-        :return:
+
+        Args:
+            instance:
+            owner:
         """
         fn: Any = self.fn
         if instance is not None:
@@ -345,7 +374,7 @@ class Syncify:
 
     This is useful for integrating async code into synchronous contexts.
 
-    Example::
+    Example:
 
     ```python
     syncer = Syncify()

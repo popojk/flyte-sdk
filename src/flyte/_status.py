@@ -70,12 +70,14 @@ class StatusProxy:
     def group(self, message: str) -> Generator[None, None, None]:
         """Nest subsequent status messages under a parent step.
 
-        Usage::
+        Usage:
 
-            with status.group("Building images..."):
-                # messages here are indented one level deeper
-                status.step("Building image for env1")
-                status.success("Built image for env1")
+        ```python
+        with status.group("Building images..."):
+            # messages here are indented one level deeper
+            status.step("Building image for env1")
+            status.success("Built image for env1")
+        ```
         """
         self.step(message)
         token = _depth_var.set(_depth_var.get() + 1)
@@ -104,7 +106,7 @@ class StatusProxy:
         indent = "  " * (depth + 1)
         icon = icons.get(level, "")
         message = _linkify(message)
-        console.print(f"{indent}{icon} {message}", highlight=False)
+        console.print(f"{indent}{icon} {message}", highlight=False, soft_wrap=True)
 
     def _emit_plain(self, level: str, message: str) -> None:
         prefixes = {"step": ">>", "success": "OK", "info": "--", "warn": "!!"}

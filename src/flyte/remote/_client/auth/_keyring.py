@@ -50,6 +50,31 @@ class Credentials(pydantic.BaseModel):
         return self
 
 
+def _get_keyring_backend():
+    """Return the keyring interface flyte uses (the `keyring` module, or a backend instance).
+
+    On macOS, talk to the keychain through flyte's own /usr/bin/security-based
+    class directly instead of `keyring`'s backend discovery: registering a
+    backend via entry points is process-global and would change credential
+    storage for unrelated packages, and `keyring`'s native macOS backend
+    authorizes per interpreter binary, which causes a password prompt for
+    every new venv (ad-hoc-signed uv pythons are each a "different app").
+    """
+    import platform
+
+    if platform.system() == "Darwin":
+        from flyte._keyring.macos import SecurityCliKeyring
+
+        return SecurityCliKeyring()
+    try:
+        import keyring
+    except ImportError as e:
+        logger.debug(f"keyring package not available, tokens will not be cached. Error: {e}")
+        return None
+
+    return keyring
+
+
 class KeyringStore:
     """
     Methods to access Keyring Store.
@@ -70,20 +95,23 @@ class KeyringStore:
         This method stores the access token, refresh token (if available), and ID token (if available)
         in the system keyring, using the endpoint as the service name and specific key names for each token type.
 
-        :param credentials: The credentials object containing tokens to store
-        :param disable: If True, skip storing tokens in the keyring
-        :return: The same credentials object that was passed in
-        :raises: Logs but does not raise NoKeyringError if the system keyring is not available
+        Logs but does not raise NoKeyringError if the system keyring is not available
+
+        Args:
+            credentials: The credentials object containing tokens to store
+            disable: If True, skip storing tokens in the keyring
+
+        Returns:
+            The same credentials object that was passed in
         """
         if disable:
             logger.debug("Keyring is disabled, skipping token store.")
             return credentials
-        try:
-            import keyring
-            from keyring.errors import NoKeyringError
-        except ImportError as e:
-            logger.debug(f"keyring package not available, tokens will not be cached. Error: {e}")
+        keyring = _get_keyring_backend()
+        if keyring is None:
+            logger.debug("keyring package not available, tokens will not be cached")
             return credentials
+        from keyring.errors import NoKeyringError
 
         try:
             keyring.set_password(
@@ -110,20 +138,21 @@ class KeyringStore:
         This method attempts to retrieve the access token, refresh token, and ID token from the system keyring
         using the endpoint as the service name. The endpoint URL scheme is stripped before lookup.
 
-        :param for_endpoint: The endpoint URL to retrieve credentials for
-        :param disable: If True, skip retrieving tokens from the keyring
-        :return: A Credentials object containing the retrieved tokens, or None if no tokens were found
-                 or if the system keyring is not available
+        Args:
+            for_endpoint: The endpoint URL to retrieve credentials for
+            disable: If True, skip retrieving tokens from the keyring
+
+        Returns:
+            A Credentials object containing the retrieved tokens, or None if no tokens were found
+            or if the system keyring is not available
         """
         if disable:
             logger.debug("Keyring is disabled, skipping token retrieve.")
             return None
-        try:
-            import keyring
-            from keyring.errors import NoKeyringError
-        except ImportError as e:
-            logger.debug(f"keyring package not available, tokens will not be cached. Error: {e}")
+        keyring = _get_keyring_backend()
+        if keyring is None:
             return None
+        from keyring.errors import NoKeyringError
 
         for_endpoint = strip_scheme(for_endpoint)
         try:
@@ -168,18 +197,18 @@ class KeyringStore:
         This method attempts to delete the access token, refresh token, and ID token from the system keyring
         using the endpoint as the service name. The endpoint URL scheme is stripped before lookup.
 
-        :param for_endpoint: The endpoint URL to delete credentials for
-        :param disable: If True, skip deleting tokens from the keyring
+        Args:
+            for_endpoint: The endpoint URL to delete credentials for
+            disable: If True, skip deleting tokens from the keyring
         """
         if disable:
             logger.debug("Keyring is disabled, skipping token delete.")
             return
-        try:
-            import keyring
-            from keyring.errors import NoKeyringError, PasswordDeleteError
-        except ImportError as e:
-            logger.debug(f"keyring package not available, skipping token delete. Error: {e}")
+        keyring = _get_keyring_backend()
+        if keyring is None:
+            logger.debug("keyring package not available, skipping token delete")
             return
+        from keyring.errors import NoKeyringError, PasswordDeleteError
 
         for_endpoint = strip_scheme(for_endpoint)
 
@@ -187,7 +216,8 @@ class KeyringStore:
             """
             Helper function to delete a specific key from the keyring.
 
-            :param key: The key name to delete
+            Args:
+                key: The key name to delete
             """
             try:
                 keyring.delete_password(for_endpoint, key)

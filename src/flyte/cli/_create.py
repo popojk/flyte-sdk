@@ -6,6 +6,7 @@ import rich_click as click
 
 import flyte
 import flyte.cli._common as common
+from flyte.artifacts import CardFormat, CardType
 from flyte.cli._option import DependentOption, MutuallyExclusiveOption
 from flyte.remote import SecretTypes
 
@@ -20,6 +21,22 @@ def _is_interactive() -> bool:
         return sys.stdin.isatty()
     except (AttributeError, ValueError):
         return False
+
+
+def _infer_card_format(path: Path) -> str:
+    """Map a card file's extension onto a CardFormat, defaulting to html when it has none."""
+    suffix = path.suffix.lstrip(".").lower()
+    if not suffix:
+        return "html"
+    aliases = {"markdown": "md", "htm": "html", "yml": "yaml"}
+    fmt = aliases.get(suffix, suffix)
+    if fmt not in get_args(CardFormat):
+        raise click.BadParameter(
+            f"cannot infer a card format from '{path.name}'; pass --card-format with one of: "
+            f"{', '.join(get_args(CardFormat))}",
+            param_hint="--card",
+        )
+    return fmt
 
 
 @click.group(name="create")
@@ -60,6 +77,139 @@ def project(cfg: common.CLIConfig, id: str, name: str, description: str, label: 
     with console.status(f"Creating project {id}..."):
         Project.create(id=id, name=name, description=description, labels=label)
     console.print(f"[bold green]Project {id} created successfully![/bold green]")
+
+
+@create.command(cls=common.CommandBase)
+@click.argument("name", type=str, required=True)
+@click.option(
+    "--from-file",
+    type=click.Path(exists=True),
+    required=True,
+    help="Publish a local file as a File artifact (contents upload to blob storage).",
+)
+@click.option("--version", type=str, default=None, help="Version to publish. Defaults to a random version.")
+@click.option("--description", type=str, default=None, help="Human readable description.")
+@click.option(
+    "--attr",
+    multiple=True,
+    callback=common.key_value_callback,
+    help="Free-form user metadata as key=value pairs. Can be specified multiple times.",
+)
+@click.option(
+    "--kind",
+    type=click.Choice(["model", "data", "generic"]),
+    default=None,
+    help=(
+        "What the artifact is. Recorded under the reserved 'flyte.io/kind' attr. "
+        "Distinct from --card-type, which controls how an attached card renders."
+    ),
+)
+@click.option(
+    "--external-ref",
+    type=str,
+    default=None,
+    help="Opaque reference into an external system (a URI, model id, ...) recorded as the artifact's source.",
+)
+@click.option(
+    "--card",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help="Local card file (HTML by default) to upload and attach to the artifact for display in the UI.",
+)
+@click.option(
+    "--card-format",
+    type=click.Choice(get_args(CardFormat)),
+    default=None,
+    help="Format of the card. Defaults to the card file's extension, or 'html' when it has none.",
+)
+@click.option(
+    "--card-type",
+    type=click.Choice(get_args(CardType)),
+    default="generic",
+    show_default=True,
+    help="Kind of card being attached.",
+)
+@click.pass_obj
+def artifact(
+    cfg: common.CLIConfig,
+    name: str,
+    from_file: str,
+    version: str | None = None,
+    description: str | None = None,
+    attr: dict[str, str] | None = None,
+    kind: str | None = None,
+    external_ref: str | None = None,
+    card: str | None = None,
+    card_format: str | None = None,
+    card_type: str = "generic",
+    project: str | None = None,
+    domain: str | None = None,
+):
+    """
+    Publish an artifact from the local machine.
+
+    The file is uploaded to blob storage and stored in the artifact service as a
+    File artifact. Primitive values (strings, numbers) are not allowed as
+    artifacts: an artifact is an addressable asset, not a scalar.
+
+    \b
+    Example usage:
+
+    ```bash
+    flyte create artifact my_model --from-file model.pt --kind model --attr framework=torch
+    flyte create artifact llama3 --from-file weights.bin --external-ref hf://meta-llama/Meta-Llama-3-8B
+    flyte create artifact my_model --from-file model.pt --card model_card.html --card-type model
+    ```
+    """
+    from flyte.artifacts import Card
+    from flyte.cli._progress import upload_display
+    from flyte.io import File
+    from flyte.remote import Artifact
+
+    cfg.init(project=project, domain=domain)
+    console = common.get_console()
+
+    publish_value: Any = File.from_local_sync(from_file)
+    python_type: type = File
+
+    # The file itself isn't uploaded by from_local_sync above: outside a task context it
+    # defers to a lazy uploader that Artifact.create drives, so both uploads happen inside
+    # this block and report into the same display.
+    target_project = project or cfg.config.task.project
+    target_domain = domain or cfg.config.task.domain
+    with upload_display(
+        f"Publishing artifact [bold]{name}[/bold]",
+        subtitle=f"{target_project}/{target_domain}" if target_project and target_domain else None,
+        no_progress=bool(cfg.no_progress),
+        console=console,
+    ) as display:
+        uploaded_card = None
+        if card:
+            card_path = Path(card)
+            fmt = card_format or _infer_card_format(card_path)
+            display.note(f"uploading {fmt} card")
+            uploaded_card = Card.create_from(
+                local_path=card_path,
+                format=fmt,  # type: ignore[arg-type]
+                card_type=card_type,  # type: ignore[arg-type]
+            )
+
+        display.note(f"publishing {Path(from_file).name}")
+        result = Artifact.create(
+            publish_value,
+            name=name,
+            version=version,
+            description=description,
+            attrs=attr or None,
+            kind=kind,  # type: ignore[arg-type]
+            card=uploaded_card,
+            python_type=python_type,
+            project=project,
+            domain=domain,
+            external_ref=external_ref,
+        )
+    console.print(f"[bold green]Published artifact {result.name}@{result.version}[/bold green]")
+    console.print(f"➡️  [blue bold][link={result.url}]{result.url}[/link][/blue bold]")
 
 
 @create.command(cls=common.CommandBase)
@@ -248,7 +398,24 @@ def secret(
     Secret.create(name=name, value=value, type=type, cluster_pool=cluster_pool)
 
 
+_DEVBOX_ENDPOINT = "localhost:30080"
+_DEVBOX_PROJECT = "flytesnacks"
+_DEVBOX_DOMAIN = "development"
+
+
 @create.command(cls=common.CommandBase)
+@click.option(
+    "--devbox",
+    is_flag=True,
+    default=False,
+    help=(
+        "Configure for a local devbox cluster (see 'flyte start devbox'). Shortcut for "
+        f"'--endpoint {_DEVBOX_ENDPOINT} --insecure --project {_DEVBOX_PROJECT} "
+        f"--domain {_DEVBOX_DOMAIN} --builder local'. Mutually exclusive with --endpoint; "
+        "--project/--domain may still be overridden."
+    ),
+    show_default=True,
+)
 @click.option("--endpoint", type=str, help="Endpoint of the Flyte backend.")
 @click.option("--insecure", is_flag=True, help="Use an insecure connection to the Flyte backend.")
 @click.option(
@@ -306,8 +473,16 @@ def secret(
     help="Enable SQLite persistence for local run metadata, allowing past runs to be browsed via 'flyte start tui'.",
     show_default=True,
 )
+@click.option(
+    "--local-tracked",
+    is_flag=True,
+    default=False,
+    help="Report local run state to the Flyte control plane so local runs show up in the console.",
+    show_default=True,
+)
 def config(
     output: str,
+    devbox: bool = False,
     endpoint: str | None = None,
     insecure: bool = False,
     org: str | None = None,
@@ -318,15 +493,30 @@ def config(
     registry: str | None = None,
     auth_type: str | None = None,
     local_persistence: bool = False,
+    local_tracked: bool = False,
 ):
     """
     Creates a configuration file for Flyte CLI.
     If the `--output` option is not specified, it will create a file named `config.yaml` in the current directory.
     If the file already exists, it will raise an error unless the `--force` option is used.
+
+    To point the CLI at a local devbox cluster started with `flyte start devbox`, use the `--devbox` shortcut:
+
+    ```bash
+    $ flyte create config --devbox
+    ```
     """
     import yaml
 
     from flyte._utils import org_from_endpoint, sanitize_endpoint
+
+    if devbox:
+        if endpoint:
+            raise click.UsageError(f"--devbox already implies --endpoint {_DEVBOX_ENDPOINT}; pass one or the other.")
+        endpoint = _DEVBOX_ENDPOINT
+        insecure = True
+        project = project or _DEVBOX_PROJECT
+        domain = domain or _DEVBOX_DOMAIN
 
     output_path = Path(output)
 
@@ -362,7 +552,9 @@ def config(
     image: Dict[str, str] = {}
     if image_builder:
         image["builder"] = image_builder
-    if not registry and image_builder != "remote" and _is_interactive():
+    if not registry and not devbox and image_builder != "remote" and _is_interactive():
+        # The devbox resolves its own push registry (the in-cluster localhost registry), so we
+        # never propose a Docker-login registry for it.
         # No explicit --registry: try to infer a push registry from the user's Docker login and
         # offer it interactively. We only ever propose here (never at `flyte run` time), only in
         # an interactive terminal, and only write it on confirmation. The remote builder resolves
@@ -380,6 +572,8 @@ def config(
     local: Dict[str, Any] = {}
     if local_persistence:
         local["persistence"] = True
+    if local_tracked:
+        local["tracked"] = True
 
     if not admin and not task and not local:
         raise click.BadParameter("At least one of --endpoint, --org, or --local-persistence must be provided.")
