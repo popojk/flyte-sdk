@@ -4,9 +4,19 @@ from typing import List
 
 import flyte
 
+image = (
+    flyte.Image.from_debian_base()
+    .with_pip_packages("cryptography==44.0.3", "pyOpenSSL==25.1.0")
+    # .with_pip_packages("cryptography==49.0.0", "pyOpenSSL==26.4.0")
+)
+
 env = flyte.TaskEnvironment(
     name="hello_world",
     resources=flyte.Resources(cpu=1, memory="1Gi"),
+    image=image,
+    secrets=[
+        flyte.Secret(key="MY_SECRET_KEY", as_env_var="MY_SECRET_KEY"),
+    ]
 )
 
 
@@ -26,6 +36,9 @@ async def square(i: int = 3) -> int:
 
 @env.task(entrypoint=True)
 async def say_hello_nested(data: str = "default string", n: int = 3) -> str:
+    import os
+    my_secret_value = os.getenv("MY_SECRET_KEY")
+    print(f"My secret value is: {my_secret_value}")
     print(f"Hello, nested! - {flyte.ctx().action}, {flyte.ctx().run_start_time}")
     coros = []
     for i in range(n):

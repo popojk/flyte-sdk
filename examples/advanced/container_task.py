@@ -13,7 +13,12 @@ greeting_task = ContainerTask(
 
 container_env = flyte.TaskEnvironment.from_task("container_env", greeting_task)
 
-env = flyte.TaskEnvironment(name="hello_world", depends_on=[container_env])
+image = (
+    flyte.Image.from_debian_base()
+    .with_pip_packages("cryptography==44.0.3", "pyOpenSSL==25.1.0")
+)
+
+env = flyte.TaskEnvironment(name="hello_world", depends_on=[container_env], image=image,)
 
 
 @env.task

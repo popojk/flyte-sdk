@@ -15,7 +15,7 @@ def f(x):
 
 ray_config = RayJobConfig(
     head_node_config=HeadNodeConfig(ray_start_params={"log-color": "True"}),
-    worker_node_config=[WorkerNodeConfig(group_name="ray-group", replicas=2)],
+    worker_node_config=[WorkerNodeConfig(group_name="ray-group", replicas=1)],
     runtime_env={"pip": ["numpy", "pandas"]},
     enable_autoscaling=False,
     shutdown_after_job_finishes=True,
@@ -29,7 +29,7 @@ image = (
 )
 
 task_env = flyte.TaskEnvironment(
-    name="hello_ray", resources=flyte.Resources(cpu=(1, 2), memory=("400Mi", "1000Mi")), image=image
+    name="hello_ray", #resources=flyte.Resources(cpu=(1, 2), memory=("400Mi", "1000Mi")), image=image
 )
 ray_env = flyte.TaskEnvironment(
     name="ray_env",
